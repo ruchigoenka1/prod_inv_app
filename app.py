@@ -9,14 +9,14 @@ st.set_page_config(page_title="Supply Chain Performance Auditor", layout="wide")
 st.title("📊 Supply Chain Performance Auditor")
 st.markdown("---")
 
-# --- 2. SIDEBAR: OPERATIONAL & COST SETTINGS ---
+# --- 2. SIDEBAR: SETTINGS ---
 with st.sidebar:
     st.header("⏱️ Simulation Settings")
     days = st.slider("Time Horizon (Days)", 100, 730, 365)
     
     st.header("📈 Demand & Risk")
     mu_demand = st.number_input("Average Daily Demand", value=100)
-    sigma_demand = st.number_input("Demand Variability (Std Dev)", value=25)
+    sigma_demand = st.number_input("Demand Variability", value=25)
     
     st.header("🏗️ Raw Material (RM) Policy")
     rm_order_qty = st.number_input("RM Order Quantity (Q)", value=5000)
@@ -34,7 +34,7 @@ with st.sidebar:
     fg_var_cost = st.number_input("Variable Prod Cost/Unit ($)", value=15)
     fg_hold_rate = st.slider("FG Annual Holding Rate (%)", 5, 50, 25) / 100
 
-# --- 3. VECTORIZED ENGINE ---
+# --- 3. THE SIMULATION ENGINE ---
 np.random.seed(42)
 daily_demand = np.random.normal(mu_demand, sigma_demand, days).clip(min=0)
 
@@ -51,12 +51,13 @@ for t in range(days):
     curr_fg += fg_in_production[t]
     
     demand = daily_demand[t]
-    if curr_fg >= demand:
-        curr_fg -= demand
-    else:
+    # STOCKOUT LOGIC: Only if FG is strictly less than demand
+    if curr_fg < demand:
         unmet_demand[t] = demand - curr_fg
         stockout_flag[t] = 1
         curr_fg = 0
+    else:
+        curr_fg -= demand
     
     pipeline_fg = fg_in_production[t+1:].sum()
     if (curr_fg + pipeline_fg) <= fg_trigger_level:
@@ -74,9 +75,7 @@ for t in range(days):
 
 # --- 4. KPIs & COST CALCULATIONS ---
 total_demand = np.sum(daily_demand)
-total_unmet = np.sum(unmet_demand)
-fill_rate = ((total_demand - total_unmet) / total_demand) * 100
-stockout_count = int(stockout_flag.sum())
+fill_rate = ((total_demand - np.sum(unmet_demand)) / total_demand) * 100
 
 daily_rm_h_rate, daily_fg_h_rate = rm_hold_rate / 365, fg_hold_rate / 365
 num_rm_orders = rm_order_triggers.sum()
@@ -87,27 +86,48 @@ cost_rm_holding = np.sum(rm_inv * rm_unit_cost * daily_rm_h_rate)
 cost_prod_fixed = prod_triggers.sum() * fg_fixed_setup
 cost_prod_var = (prod_triggers.sum() * fg_batch_size) * fg_var_cost
 cost_fg_holding = np.sum(fg_inv * (rm_unit_cost + fg_var_cost) * daily_fg_h_rate)
-total_tco = cost_rm_purchase + cost_rm_ordering + cost_rm_holding + cost_prod_fixed + cost_prod_var + cost_fg_holding
+
+total_tco = (cost_rm_purchase + cost_rm_ordering + cost_rm_holding + 
+             cost_prod_fixed + cost_prod_var + cost_fg_holding)
 
 # --- 5. TOP LEVEL KPIs ---
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Service Fill Rate", f"{fill_rate:.1f}%")
-kpi2.metric("Stockout Days", stockout_count, delta_color="inverse")
-kpi3.metric("Total System TCO", f"${total_tco:,.0f}")
-kpi4.metric("Avg FG Inventory", f"{fg_inv.mean():,.0f}")
+k1, k2, k3, k4, k5 = st.columns(5)
+k1.metric("Service Fill Rate", f"{fill_rate:.1f}%")
+k2.metric("Stockout Days", int(stockout_flag.sum()), delta_color="inverse")
+k3.metric("System TCO", f"${total_tco:,.0f}")
+k4.metric("Avg FG Inventory", f"{fg_inv.mean():,.0f}")
+k5.metric("Avg RM Inventory", f"{rm_inv.mean():,.0f}")
 
 st.divider()
 
-# --- 6. VISUALIZATIONS ---
-# Graph A: Demand Curve
+# --- 6. COST BREAKUP (NOW BELOW KPIs) ---
+st.subheader("📝 Granular Cost Breakup")
+breakdown_data = [
+    {"Component": "RM Purchase", "Value ($)": cost_rm_purchase},
+    {"Component": "RM Ordering", "Value ($)": cost_rm_ordering},
+    {"Component": "RM Holding", "Value ($)": cost_rm_holding},
+    {"Component": "Prod Setup", "Value ($)": cost_prod_fixed},
+    {"Component": "Prod Variable", "Value ($)": cost_prod_var},
+    {"Component": "FG Holding", "Value ($)": cost_fg_holding},
+    {"Component": "TOTAL SYSTEM COST", "Value ($)": total_tco}
+]
+breakdown_df = pd.DataFrame(breakdown_data)
+
+# Highlighting the total row
+st.table(breakdown_df.style.format({"Value ($)": "{:,.2f}"}).map(
+    lambda x: 'font-weight: bold; background-color: #333333' if x == "TOTAL SYSTEM COST" else '', 
+    subset=['Component']
+))
+
+st.divider()
+
+# --- 7. VISUALIZATIONS ---
 st.subheader("📈 Daily Demand Curve")
 demand_df = pd.DataFrame({'Day': range(days), 'Demand': daily_demand})
-demand_chart = alt.Chart(demand_df).mark_area(line={'color':'#e45756'}, opacity=0.3, color='#e45756').encode(
+st.altair_chart(alt.Chart(demand_df).mark_area(line={'color':'#e45756'}, opacity=0.3, color='#e45756').encode(
     x='Day:Q', y='Demand:Q'
-).properties(height=150)
-st.altair_chart(demand_chart, use_container_width=True)
+).properties(height=150), use_container_width=True)
 
-# Graph B: Inventory with Blue Lines & "X" Markers
 st.subheader("📦 Inventory Movement & Stockout Alerts")
 inv_df = pd.DataFrame({'Day': range(days), 'RM Inventory': rm_inv, 'FG Inventory': fg_inv, 'Stockout': stockout_flag})
 inv_melted = inv_df[['Day', 'RM Inventory', 'FG Inventory']].melt('Day', var_name='Type', value_name='Value')
@@ -117,32 +137,18 @@ lines = alt.Chart(inv_melted).mark_line().encode(
     color=alt.Color('Type:N', scale=alt.Scale(domain=['RM Inventory', 'FG Inventory'], range=['#1f77b4', '#a6cee3']))
 )
 
-# Stockout "X" Markers at baseline
+# Stockout "X" Markers (positioned at baseline)
 x_marks = alt.Chart(inv_df[inv_df['Stockout'] == 1]).mark_point(
     shape='cross', color='red', size=200, strokeWidth=3, angle=45
 ).encode(x='Day:Q', y=alt.value(290))
 
 st.altair_chart(lines + x_marks, use_container_width=True)
 
-st.divider()
-
-# --- 7. DATA TABLES ---
-col_table, col_audit = st.columns([1, 1.5])
-
-with col_table:
-    st.subheader("📝 Granular Cost Breakup")
-    breakdown_df = pd.DataFrame({
-        "Component": ["RM Purchase", "RM Ordering", "RM Holding", "Prod Setup", "Prod Variable", "FG Holding"],
-        "Value ($)": [cost_rm_purchase, cost_rm_ordering, cost_rm_holding, cost_prod_fixed, cost_prod_var, cost_fg_holding]
-    })
-    st.table(breakdown_df.style.format({"Value ($)": "{:,.2f}"}))
-
-with col_audit:
-    st.subheader("📋 Audit Trail (Last 15 Days)")
-    audit_df = pd.DataFrame({
-        'Day': range(days), 'Demand': daily_demand, 'FG Inv': fg_inv, 'RM Inv': rm_inv, 'Stockout': stockout_flag
-    }).tail(15)
-    st.dataframe(
-        audit_df.style.map(lambda x: 'background-color: #ffcccc' if x == 1 else '', subset=['Stockout']),
-        use_container_width=True, hide_index=True
-    )
+st.subheader("📋 Audit Trail (Last 15 Days)")
+audit_df = pd.DataFrame({
+    'Day': range(days), 'Demand': daily_demand, 'FG Inv': fg_inv, 'RM Inv': rm_inv, 'Stockout': stockout_flag
+}).tail(15)
+st.dataframe(
+    audit_df.style.map(lambda x: 'background-color: #442222' if x == 1 else '', subset=['Stockout']),
+    use_container_width=True, hide_index=True
+)
