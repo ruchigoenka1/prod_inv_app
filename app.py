@@ -8,8 +8,7 @@ st.set_page_config(page_title="Supply Chain Performance Auditor", layout="wide")
 st.title("📊 Supply Chain Performance Auditor")
 st.markdown("---")
 
-# 1. SIDEBAR: SIMULATION & OPERATIONAL SETTINGS
-# --- Features: Demand Variability, Production Time, Stockout Logic ---
+# --- 1. SIDEBAR: OPERATIONAL SETTINGS ---
 with st.sidebar:
     st.header("⏱️ Simulation Settings")
     days = st.slider("Time Horizon (Days)", 100, 730, 365)
@@ -28,11 +27,10 @@ with st.sidebar:
     fg_trigger_level = st.number_input("FG Reorder Point (ROP)", value=800)
     prod_lead_time = st.slider("Production Lead Time (Days)", 1, 14, 3)
 
-# 2. VECTORIZED SIMULATION ENGINE (Integrated with Lead Times and ROP)
+# --- 2. ENGINE ---
 np.random.seed(42)
 daily_demand = np.random.normal(mu_demand, sigma_demand, days).clip(min=0)
 
-# Arrays for state tracking
 fg_inv, rm_inv = np.zeros(days), np.zeros(days)
 rm_on_order, fg_in_production = np.zeros(days + rm_lead_time + 1), np.zeros(days + prod_lead_time + 1)
 stockout_days = np.zeros(days)
@@ -43,92 +41,94 @@ for t in range(days):
     curr_rm += rm_on_order[t]
     curr_fg += fg_in_production[t]
     
-    # Daily Demand Consumption & Stockout Check
     demand = daily_demand[t]
     if curr_fg >= demand:
         curr_fg -= demand
     else:
-        # Stockout occurs
         stockout_days[t] = 1
         curr_fg = 0
     
-    # Production Trigger (FG ROP)
     pipeline_fg = fg_in_production[t+1:].sum()
     if (curr_fg + pipeline_fg) <= fg_trigger_level:
         if curr_rm >= fg_batch_size:
             fg_in_production[t + prod_lead_time] += fg_batch_size
             curr_rm -= fg_batch_size
 
-    # Raw Material Reorder Trigger (RM ROP)
     pipeline_rm = rm_on_order[t+1:].sum()
     if (curr_rm + pipeline_rm) <= rm_rop:
         rm_on_order[t + rm_lead_time] += rm_order_qty
         
     fg_inv[t], rm_inv[t] = curr_fg, curr_rm
 
-# 3. METRICS & OPERATIONAL AUDIT
-total_stockout_days = int(stockout_days.sum())
-fill_rate = ((np.sum(daily_demand) - np.sum(np.where(stockout_days==1, daily_demand, 0))) / np.sum(daily_demand)) * 100
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Service Fill Rate", f"{fill_rate:.1f}%")
-c2.metric("Total Stockout Days", total_stockout_days)
-c3.metric("Avg FG Inventory", f"{fg_inv.mean():,.0f}")
-
-st.divider()
-
-# 4. ENHANCED VISUALIZATION: INVENTORY MOVEMENTS & STOCKOUT WEDGES
-st.subheader("Inventory Movement & Stockout Wedges")
-
-# Multi-layered chart with Demand, Inventories, and markers
+# --- 3. DATA PREPARATION ---
 base_chart_data = pd.DataFrame({
     'Day': range(days),
     'RM Inventory': rm_inv,
     'FG Inventory': fg_inv,
     'Daily Demand': daily_demand,
     'Stockout': stockout_days
-}).set_index('Day')
+})
 
-# Continuous Inventory Lines
-lines_chart = alt.Chart(base_chart_data.reset_index().melt('Day', var_name='Type', value_name='Value')).mark_line().encode(
+# --- 4. VISUALIZATIONS ---
+
+# Graph A: Demand Curve (Separate)
+st.subheader("📈 Daily Demand Curve")
+demand_chart = alt.Chart(base_chart_data).mark_area(
+    line={'color':'#e45756'},
+    color=alt.Gradient(
+        gradient='linear',
+        stops=[alt.GradientStop(color='white', offset=0),
+               alt.GradientStop(color='#e45756', offset=1)],
+        x1=1, x2=1, y1=1, y2=0
+    ),
+    opacity=0.4
+).encode(
     x='Day:Q',
-    y='Value:Q',
-    color=alt.Color('Type:N', scale=alt.Scale(range=['#4c78a8', '#f58518', '#e45756'])) # Custom colors
+    y=alt.Y('Daily Demand:Q', title="Units Demanded")
+).properties(height=180)
+st.altair_chart(demand_chart, use_container_width=True)
+
+# Graph B: Inventory Movement with Blue Lines & "X" Markers
+st.subheader("📦 Inventory Movement & Stockout Alerts")
+
+# Inventory Lines (Blue Tones)
+inv_melted = base_chart_data[['Day', 'RM Inventory', 'FG Inventory']].melt('Day', var_name='Type', value_name='Value')
+inv_lines = alt.Chart(inv_melted).mark_line().encode(
+    x='Day:Q',
+    y=alt.Y('Value:Q', title="Inventory Level"),
+    color=alt.Color('Type:N', scale=alt.Scale(domain=['RM Inventory', 'FG Inventory'], range=['#1f77b4', '#a6cee3']))
 )
 
-# Demand Graph as an area chart in the background
-demand_area = alt.Chart(base_chart_data.reset_index()).mark_area(opacity=0.3, color='#e45756').encode(
+# Stockout "X" Markers (Markers sitting at 0)
+stockout_pts = base_chart_data[base_chart_data['Stockout'] == 1]
+x_markers = alt.Chart(stockout_pts).mark_point(
+    shape='cross',
+    color='red',
+    size=200,
+    strokeWidth=3,
+    angle=45 # Tilts the cross to make it an 'X'
+).encode(
     x='Day:Q',
-    y='Daily Demand:Q'
+    y=alt.value(290) # Positions it precisely at the chart baseline
 )
 
-# Stockout "Wedge" Markers (Discrete Mark Rules)
-wedge_markers = alt.Chart(base_chart_data[base_chart_data['Stockout'] == 1].reset_index()).mark_rule(color='red', strokeWidth=2).encode(
-    x='Day:Q',
-    y=alt.Y('FG Inventory:Q', scale=alt.Scale(domain=[0, 100])), # Placed at the very bottom
-    y2=alt.value(0) # Extends to zero
-)
+st.altair_chart(inv_lines + x_markers, use_container_width=True)
 
-# Combined Chart (layered)
-layered_chart = alt.layer(demand_area, lines_chart, wedge_markers).resolve_scale(y='independent')
-st.altair_chart(layered_chart, use_container_width=True)
-
+# --- 5. DATA AUDIT TABLES ---
 st.divider()
-
-# 5. GRANULAR DATA AUDIT TABLES
-st.subheader("📋 Granular Operational Data (Audit Trail)")
+st.subheader("📋 Audit Trail")
 col_fg, col_rm = st.columns(2)
 
 with col_fg:
-    st.write("**Finished Goods Inventory & Service Level**")
-    fg_audit_df = base_chart_data[['Daily Demand', 'FG Inventory', 'Stockout']].tail(20)
-    st.dataframe(fg_audit_df.style.applymap(lambda x: 'background-color: lightcoral' if x == 1 else '', subset=['Stockout']), use_container_width=True)
+    st.write("**Finished Goods & Service Level**")
+    fg_audit = base_chart_data[['Day', 'Daily Demand', 'FG Inventory', 'Stockout']].tail(15)
+    st.dataframe(
+        fg_audit.style.map(lambda x: 'background-color: #ffcccc' if x == 1 else '', subset=['Stockout']),
+        use_container_width=True, hide_index=True
+    )
 
 with col_rm:
-    st.write("**Raw Material Availability & Consumption**")
-    # Simulate a daily consumption for table view
+    st.write("**Raw Material Flows**")
     daily_rm_cons = np.where(pd.Series(np.diff(rm_inv, prepend=curr_rm)) < 0, fg_batch_size, 0)
-    rm_audit_df = pd.DataFrame({'RM Inventory': rm_inv, 'RM Consumption': daily_rm_cons}, index=base_chart_data.index).tail(20)
-    st.dataframe(rm_audit_df, use_container_width=True)
-
-st.info("💡 **Auditor Insight:** The red vertical rules (wedges) appear only on days where stockout is 1. Notice how Stockout 1 corresponds to where the FG line hits the baseline. If these red wedges appear despite having high RM inventory, the root cause is a production line constraint, not material availability.")
+    rm_audit = pd.DataFrame({'Day': range(days), 'RM Inventory': rm_inv, 'RM Consumption': daily_rm_cons}).tail(15)
+    st.dataframe(rm_audit, use_container_width=True, hide_index=True)
