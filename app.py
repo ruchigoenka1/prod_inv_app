@@ -12,7 +12,6 @@ st.markdown("---")
 # --- 2. SIDEBAR SETTINGS ---
 with st.sidebar:
     st.header("🔄 Scenario Control")
-    # Button to refresh demand data
     if st.button("Generate New Demand Scenario"):
         if 'demand_seed' not in st.session_state:
             st.session_state.demand_seed = 0
@@ -41,7 +40,7 @@ with st.sidebar:
     fg_var_cost = st.number_input("Variable Prod Cost/Unit ($)", value=15.0)
     fg_hold_rate = st.slider("FG Annual Holding Rate (%)", 5, 50, 25) / 100
 
-# --- 3. DEMAND GENERATION (LOCKED VIA SESSION STATE) ---
+# --- 3. DEMAND GENERATION ---
 if 'demand_seed' not in st.session_state:
     st.session_state.demand_seed = 42
 
@@ -55,9 +54,8 @@ fg_in_production = np.zeros(days + prod_lead_time + 1)
 prod_triggers, rm_order_triggers = np.zeros(days), np.zeros(days)
 unmet_demand, stockout_flag = np.zeros(days), np.zeros(days)
 
-# CORRECTED LOGIC: Opening balance covers Lead Time + a small buffer 
-# (Total demand during Lead Time) * 1.5 usually provides a realistic start
-curr_fg = (mu_demand * prod_lead_time) * 1.5 
+# Logic: Opening Balance = 1.25 * Production Trigger Point
+curr_fg = fg_trigger_level * 1.25 
 curr_rm = rm_order_qty
 
 for t in range(days):
@@ -65,6 +63,7 @@ for t in range(days):
     curr_fg += fg_in_production[t]
     
     demand = daily_demand[t]
+    # Stockout Logic: Current FG cannot meet demand
     if curr_fg < demand:
         unmet_demand[t] = demand - curr_fg
         stockout_flag[t] = 1
@@ -72,6 +71,7 @@ for t in range(days):
     else:
         curr_fg -= demand
     
+    # Production Triggering
     pipeline_fg = fg_in_production[t+1:].sum()
     if (curr_fg + pipeline_fg) <= fg_trigger_level:
         if curr_rm >= fg_batch_size:
@@ -79,6 +79,7 @@ for t in range(days):
             curr_rm -= fg_batch_size
             prod_triggers[t] = 1
 
+    # RM Reordering
     pipeline_rm = rm_on_order[t+1:].sum()
     if (curr_rm + pipeline_rm) <= rm_rop:
         rm_on_order[t + rm_lead_time] += rm_order_qty
@@ -99,7 +100,7 @@ cost_prod_var = (prod_triggers.sum() * fg_batch_size) * fg_var_cost
 cost_fg_holding = np.sum(fg_inv * (rm_unit_cost + fg_var_cost) * daily_fg_h_rate)
 total_tco = cost_rm_purchase + cost_rm_ordering + cost_rm_holding + cost_prod_fixed + cost_prod_var + cost_fg_holding
 
-# --- 6. UI DASHBOARD ---
+# --- 6. KPI METRICS ---
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Service Fill Rate", f"{fill_rate:.1f}%")
 k2.metric("Stockout Days", int(stockout_flag.sum()), delta_color="inverse")
@@ -139,6 +140,7 @@ st.subheader("📦 Inventory Movement & Stockout Alerts")
 inv_df = pd.DataFrame({'Day': range(days), 'RM Inventory': rm_inv, 'FG Inventory': fg_inv, 'Stockout': stockout_flag})
 inv_melted = inv_df[['Day', 'RM Inventory', 'FG Inventory']].melt('Day', var_name='Type', value_name='Value')
 
+# Custom Blue/Azure Lines
 lines = alt.Chart(inv_melted).mark_line().encode(
     x='Day:Q', y='Value:Q',
     color=alt.Color('Type:N', scale=alt.Scale(domain=['RM Inventory', 'FG Inventory'], range=['#1f77b4', '#a6cee3']))
@@ -147,7 +149,7 @@ lines = alt.Chart(inv_melted).mark_line().encode(
 # Stockout "X" Markers
 x_marks = alt.Chart(inv_df[inv_df['Stockout'] == 1]).mark_point(
     shape='cross', color='red', size=200, strokeWidth=3, angle=45
-).encode(x='Day:Q', y=alt.value(290))
+).encode(x='Day:Q', y=alt.value(290)) # Adjust value(290) based on chart height if needed
 
 st.altair_chart(lines + x_marks, use_container_width=True)
 
