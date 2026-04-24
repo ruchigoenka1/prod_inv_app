@@ -2,90 +2,100 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="Production & Inventory Optimizer", layout="wide")
+st.set_page_config(page_title="Pro Inventory Auditor", layout="wide")
 
-st.title("🏭 Total Cost of Production & Inventory Simulator")
+st.title("🏭 Professional Production & Inventory Simulator")
 
-# --- SIDEBAR: INPUTS ---
+# --- 1. SIDEBAR: PROFESSIONAL PARAMETERS ---
 with st.sidebar:
-    st.header("⏱️ Simulation Settings")
-    days = st.slider("Simulation Horizon (Days)", 100, 730, 365)
+    st.header("⏱️ Simulation Period")
+    days = st.slider("Time Horizon (Days)", 100, 730, 365)
     
-    st.header("📈 Demand (Normal Distribution)")
-    mu = st.number_input("Mean Daily Demand", value=50)
-    sigma = st.number_input("Daily Demand Variability (Std Dev)", value=10)
+    st.header("📈 Demand & Risk")
+    mu = st.number_input("Average Daily Demand", value=100)
+    sigma = st.number_input("Demand Variability (Std Dev)", value=25)
+    safety_stock = st.number_input("Safety Stock Level", value=200)
     
-    st.header("💰 Cost Factors")
-    fixed_setup = st.number_input("Fixed Cost per Batch ($)", value=2000)
-    var_prod_unit = st.number_input("Variable Production/Unit ($)", value=15)
-    rm_cost_unit = st.number_input("Raw Material/Unit ($)", value=25)
+    st.header("💰 Cost Architecture")
+    fixed_setup = st.number_input("Setup/Fixed Cost ($)", value=5000)
+    # Variable cost logic: we'll simulate it decreasing slightly with volume
+    base_var_cost = st.number_input("Base Variable Cost/Unit ($)", value=20)
+    rm_cost_unit = st.number_input("Raw Material Cost/Unit ($)", value=35)
     
-    st.header("📦 Inventory Policy")
-    batch_size = st.number_input("Chosen Batch Size", min_value=1, value=500)
-    holding_rate_annual = st.slider("Annual Holding Cost %", 5, 50, 20) / 100
+    st.header("📦 Batching Policy")
+    batch_size = st.number_input("Production Batch Size", min_value=1, value=1000)
+    annual_holding_rate = st.slider("Annual Holding Cost (%)", 5, 50, 20) / 100
 
-# --- VECTORIZED CALCULATIONS ---
-# 1. Daily Demand Simulation
+# --- 2. VECTORIZED ENGINE ---
+# Generate Demand
 np.random.seed(42)
+days_array = np.arange(days)
 daily_demand = np.random.normal(mu, sigma, days).clip(min=0)
-total_demand = daily_demand.sum()
+cumulative_demand = np.cumsum(daily_demand)
 
-# 2. Production Metrics
-num_batches = np.ceil(total_demand / batch_size)
+# Vectorized Batch Calculation
+# We calculate when 'cumulative demand + safety stock' exceeds our available supply
+total_needed = cumulative_demand + safety_stock
+batches_needed = np.ceil(total_needed / batch_size).astype(int)
+
+# Identify specifically where a batch "Spikes"
+# A batch is triggered when the number of needed batches increases from the previous day
+batch_triggers = np.diff(batches_needed, prepend=0) 
+production_spikes = batch_triggers * batch_size
+
+# Calculate Inventories (Vectorized)
+# FG Inventory = (Total Batches Produced to date) - (Cumulative Demand to date)
+fg_inventory = (np.cumsum(batch_triggers) * batch_size) - cumulative_demand
+
+# RM Inventory = (Total RM purchased initially) - (Total used in production so far)
+total_rm_required = np.sum(batch_triggers) * batch_size
+rm_inventory = total_rm_required - (np.cumsum(batch_triggers) * batch_size)
+
+# --- 3. COST BREAKDOWN TABLE ---
+# Calculate components
+num_batches = batch_triggers.sum()
 total_units = num_batches * batch_size
-daily_holding_rate = holding_rate_annual / 365
+daily_holding_rate = annual_holding_rate / 365
 
-# 3. Cost Breakup Logic
-# Raw Material
-rm_purchase = total_units * rm_cost_unit
-rm_holding = (batch_size / 2) * rm_cost_unit * daily_holding_rate * days
+cost_rm_purchase = total_units * rm_cost_unit
+cost_rm_holding = np.mean(rm_inventory) * rm_cost_unit * daily_holding_rate * days
+cost_prod_fixed = num_batches * fixed_setup
+cost_prod_var = total_units * base_var_cost
+# Finished Good Value = (RM + Var + Fixed Spread)
+unit_fg_value = rm_cost_unit + base_var_cost + (cost_prod_fixed / total_units if total_units > 0 else 0)
+cost_fg_holding = np.mean(fg_inventory) * unit_fg_value * daily_holding_rate * days
 
-# Production
-prod_fixed = num_batches * fixed_setup
-prod_variable = total_units * var_prod_unit
+total_tco = cost_rm_purchase + cost_rm_holding + cost_prod_fixed + cost_prod_var + cost_fg_holding
 
-# Finished Goods (FG)
-unit_fg_val = rm_cost_unit + var_prod_unit + (prod_fixed / total_units)
-fg_holding = (batch_size / 2) * unit_fg_val * daily_holding_rate * days
+# --- 4. UI DISPLAY ---
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Total TCO", f"${total_tco:,.2f}")
+m2.metric("Total Units", f"{total_units:,.0f}")
+m3.metric("Avg. Holding Cost/Day", f"${(cost_rm_holding + cost_fg_holding)/days:,.2f}")
+m4.metric("Batches Required", int(num_batches))
 
-total_cost = rm_purchase + rm_holding + prod_fixed + prod_variable + fg_holding
+st.subheader("📊 Inventory Movement & Demand")
+tab1, tab2 = st.tabs(["Visual Movement", "Detailed Data"])
 
-# --- UI: DISPLAY METRICS & TABLE ---
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total TCO", f"${total_cost:,.2f}")
-col2.metric("Batches Run", int(num_batches))
-col3.metric("Avg. Unit Cost", f"${(total_cost/total_units):.2f}")
-col4.metric("Total Production", f"{total_units:,.0f} units")
+with tab1:
+    # Prepare DataFrame for plotting
+    plot_df = pd.DataFrame({
+        "Day": days_array,
+        "Daily Demand": daily_demand,
+        "FG Inventory": fg_inventory,
+        "RM Inventory": rm_inventory
+    }).set_index("Day")
+    
+    st.line_chart(plot_df[["FG Inventory", "RM Inventory"]])
+    st.bar_chart(plot_df["Daily Demand"])
 
-st.subheader("📋 Total Cost Breakup")
-breakdown_data = {
-    "Category": ["Raw Material", "Raw Material", "Production", "Production", "Finished Goods", "TOTAL"],
-    "Cost Component": ["Purchase/Ordering", "Holding Cost", "Fixed (Setup)", "Variable (Volume)", "Holding Cost", "All In"],
-    "Amount ($)": [rm_purchase, rm_holding, prod_fixed, prod_variable, fg_holding, total_cost]
-}
-st.table(pd.DataFrame(breakdown_data).style.format({"Amount ($)": "{:,.2f}"}))
+with tab2:
+    st.dataframe(plot_df, use_container_width=True)
 
-# --- VECTORIZED SENSITIVITY ANALYSIS ---
-st.divider()
-st.subheader("📉 Optimization: Finding the 'Sweet Spot'")
-st.markdown("This chart shows how **Total Cost** changes as you adjust the Batch Size.")
-
-# Vectorized array for batch sizes 100 to 5000
-b_range = np.arange(100, 5001, 50)
-s_batches = np.ceil(total_demand / b_range)
-
-# Vectorized Costing
-s_fixed = s_batches * fixed_setup
-s_holding = (b_range / 2) * (rm_cost_unit + var_prod_unit) * daily_holding_rate * days
-s_total = (total_demand * (rm_cost_unit + var_prod_unit)) + s_fixed + s_holding
-
-viz_df = pd.DataFrame({
-    "Batch Size": b_range,
-    "Setup Costs": s_fixed,
-    "Inventory Holding Costs": s_holding,
-    "Total System Cost": s_total
-}).set_index("Batch Size")
-
-st.line_chart(viz_df)
-
-st.success(f"**Insight:** To minimize costs over {days} days, your batch size should be near the lowest point of the 'Total System Cost' curve.")
+st.subheader("📝 Cost Breakup Table")
+breakdown_df = pd.DataFrame({
+    "Major Category": ["Raw Material", "Raw Material", "Production", "Production", "Finished Goods", "TOTAL"],
+    "Line Item": ["Purchasing", "Holding Cost", "Fixed Setup", "Variable Volume", "Holding Cost", "System Total"],
+    "Amount ($)": [cost_rm_purchase, cost_rm_holding, cost_prod_fixed, cost_prod_var, cost_fg_holding, total_tco]
+})
+st.table(breakdown_df.style.format({"Amount ($)": "{:,.2f}"}))
