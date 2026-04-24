@@ -2,10 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# Page Config
+# Page Configuration
 st.set_page_config(page_title="Supply Chain Auditor Pro", layout="wide")
 
-st.title("🏭 Ultimate Production & Inventory Auditor")
+st.title("🏭 Total Cost Auditor: Production & Supply Chain")
 st.markdown("---")
 
 # --- 1. SIDEBAR: PROFESSIONAL PARAMETERS ---
@@ -22,6 +22,7 @@ with st.sidebar:
     rm_rop = st.number_input("RM Reorder Point (ROP)", value=2000)
     rm_lead_time = st.slider("RM Lead Time (Days)", 0, 14, 5)
     rm_unit_cost = st.number_input("RM Cost per Unit ($)", value=25)
+    rm_order_fixed_cost = st.number_input("Fixed Cost per RM Order ($)", value=300)
     rm_hold_rate = st.slider("RM Annual Holding Rate (%)", 5, 50, 15) / 100
     
     st.header("📦 Production (FG) Policy")
@@ -52,15 +53,14 @@ for t in range(days):
     # B. Finished Goods Consumption
     curr_fg -= daily_demand[t]
     
-    # C. Production Trigger (When FG hits 0, pull from RM)
+    # C. Production Trigger
     if curr_fg <= 0:
         if curr_rm >= fg_batch_size:
             curr_fg += fg_batch_size
             curr_rm -= fg_batch_size
             prod_triggers[t] = 1
-        # (Optional: Add stockout logic here)
 
-    # D. RM Reorder Trigger (If RM Inventory + Transit < ROP)
+    # D. RM Reorder Trigger (Inventory + Transit)
     effective_rm = curr_rm + rm_on_order[t+1:].sum()
     if effective_rm <= rm_rop:
         rm_on_order[t + rm_lead_time] += rm_order_qty
@@ -69,13 +69,14 @@ for t in range(days):
     fg_inv[t] = max(curr_fg, 0)
     rm_inv[t] = curr_rm
 
-# --- 3. VECTORIZED COST ANALYSIS ---
+# --- 3. VECTORIZED BIFURCATED COST ANALYSIS ---
 daily_rm_h_rate = rm_hold_rate / 365
 daily_fg_h_rate = fg_hold_rate / 365
 
-# Raw Material Costs
-total_rm_purchased = rm_order_triggers.sum() * rm_order_qty
-cost_rm_purchase = total_rm_purchased * rm_unit_cost
+# Raw Material Costs (BIFURCATED)
+num_rm_orders = rm_order_triggers.sum()
+cost_rm_purchase = (num_rm_orders * rm_order_qty) * rm_unit_cost
+cost_rm_ordering = num_rm_orders * rm_order_fixed_cost
 cost_rm_holding = np.sum(rm_inv * rm_unit_cost * daily_rm_h_rate)
 
 # Production Costs
@@ -83,32 +84,34 @@ total_batches = prod_triggers.sum()
 cost_prod_fixed = total_batches * fg_fixed_setup
 cost_prod_var = (total_batches * fg_batch_size) * fg_var_cost
 
-# Finished Goods Holding Costs (Material + Value Add)
+# Finished Goods Holding Costs
 unit_fg_value = rm_unit_cost + fg_var_cost
 cost_fg_holding = np.sum(fg_inv * unit_fg_value * daily_fg_h_rate)
 
-total_tco = cost_rm_purchase + cost_rm_holding + cost_prod_fixed + cost_prod_var + cost_fg_holding
+total_tco = (cost_rm_purchase + cost_rm_ordering + cost_rm_holding + 
+             cost_prod_fixed + cost_prod_var + cost_fg_holding)
 
 # --- 4. DASHBOARD UI ---
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total TCO", f"${total_tco:,.2f}")
-col2.metric("Production Runs", int(total_batches))
-col3.metric("RM Orders Placed", int(rm_order_triggers.sum()))
-col4.metric("Avg FG Inventory", f"{fg_inv.mean():,.0f}")
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Total System TCO", f"${total_tco:,.2f}")
+m2.metric("Production Runs", int(total_batches))
+m3.metric("Purchase Orders (PO)", int(num_rm_orders))
+m4.metric("Avg RM Stock", f"{rm_inv.mean():,.0f}")
 
-st.subheader("📋 Detailed Cost Breakup")
+st.subheader("📋 Granular Cost Breakup")
 breakdown_df = pd.DataFrame({
-    "Category": ["Raw Material", "Raw Material", "Production", "Production", "Finished Goods", "TOTAL"],
-    "Component": ["Purchasing", "Holding (RM)", "Fixed Setups", "Variable Volume", "Holding (FG)", "System TCO"],
-    "Value ($)": [cost_rm_purchase, cost_rm_holding, cost_prod_fixed, cost_prod_var, cost_fg_holding, total_tco]
+    "Category": ["Raw Material", "Raw Material", "Raw Material", "Production", "Production", "Finished Goods", "TOTAL"],
+    "Component": ["Material Purchase Cost", "Ordering/Fixed PO Cost", "Holding Cost (RM)", 
+                  "Fixed Setup Cost", "Variable Volume Cost", "Holding Cost (FG)", "System TCO"],
+    "Value ($)": [cost_rm_purchase, cost_rm_ordering, cost_rm_holding, 
+                  cost_prod_fixed, cost_prod_var, cost_fg_holding, total_tco]
 })
 st.table(breakdown_df.style.format({"Value ($)": "{:,.2f}"}))
 
 st.divider()
 
 # --- 5. VISUALIZATIONS ---
-st.subheader("📉 Inventory Movement Analysis")
-st.markdown("Observe the interaction between **Raw Material depletion** and **Finished Good spikes**.")
+st.subheader("📉 Movement & Demand Visualization")
 viz_df = pd.DataFrame({
     "Day": range(days),
     "RM Inventory": rm_inv,
@@ -119,4 +122,4 @@ viz_df = pd.DataFrame({
 st.line_chart(viz_df[["RM Inventory", "FG Inventory"]])
 st.bar_chart(viz_df["Daily Demand"])
 
-st.info("💡 **Insight:** Notice how Raw Material 'steps down' exactly when Finished Goods 'spikes'—this is the moment production converts your cash from materials to finished product.")
+st.info("💡 **Auditor Note:** Notice how bifurcating RM costs reveals that even if your Purchase Cost is high, your 'Ordering Cost' is actually a choice of frequency vs. volume.")
