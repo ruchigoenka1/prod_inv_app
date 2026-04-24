@@ -9,29 +9,29 @@ st.set_page_config(page_title="Supply Chain Performance Auditor", layout="wide")
 st.title("📊 Supply Chain Performance Auditor")
 st.markdown("---")
 
-# --- 2. SIDEBAR: SETTINGS ---
+# --- 2. SIDEBAR SETTINGS ---
 with st.sidebar:
     st.header("⏱️ Simulation Settings")
     days = st.slider("Time Horizon (Days)", 100, 730, 365)
     
     st.header("📈 Demand & Risk")
     mu_demand = st.number_input("Average Daily Demand", value=100)
-    sigma_demand = st.number_input("Demand Variability", value=25)
+    sigma_demand = st.number_input("Demand Variability (Std Dev)", value=25)
     
     st.header("🏗️ Raw Material (RM) Policy")
     rm_order_qty = st.number_input("RM Order Quantity (Q)", value=5000)
     rm_rop = st.number_input("RM Reorder Point (ROP)", value=2500)
     rm_lead_time = st.slider("RM Lead Time (Days)", 1, 14, 5)
-    rm_unit_cost = st.number_input("RM Unit Cost ($)", value=25)
-    rm_order_fixed_cost = st.number_input("Fixed Cost per RM Order ($)", value=300)
+    rm_unit_cost = st.number_input("RM Unit Cost ($)", value=25.0)
+    rm_order_fixed_cost = st.number_input("Fixed Cost per RM Order ($)", value=300.0)
     rm_hold_rate = st.slider("RM Annual Holding Rate (%)", 5, 50, 15) / 100
     
     st.header("📦 Production (FG) Policy")
     fg_batch_size = st.number_input("Production Batch Size", value=1500)
     fg_trigger_level = st.number_input("Production Trigger (FG ROP)", value=800)
     prod_lead_time = st.slider("Production Lead Time (Days)", 1, 14, 3)
-    fg_fixed_setup = st.number_input("Setup Cost per Batch ($)", value=2000)
-    fg_var_cost = st.number_input("Variable Prod Cost/Unit ($)", value=15)
+    fg_fixed_setup = st.number_input("Setup Cost per Batch ($)", value=2000.0)
+    fg_var_cost = st.number_input("Variable Prod Cost/Unit ($)", value=15.0)
     fg_hold_rate = st.slider("FG Annual Holding Rate (%)", 5, 50, 25) / 100
 
 # --- 3. THE SIMULATION ENGINE ---
@@ -44,14 +44,15 @@ fg_in_production = np.zeros(days + prod_lead_time + 1)
 prod_triggers, rm_order_triggers = np.zeros(days), np.zeros(days)
 unmet_demand, stockout_flag = np.zeros(days), np.zeros(days)
 
-curr_fg, curr_rm = fg_batch_size, rm_order_qty
+# Logic: Opening Balance = 95% of demand during lead time
+curr_fg = (mu_demand * prod_lead_time) * 0.95
+curr_rm = rm_order_qty
 
 for t in range(days):
     curr_rm += rm_on_order[t]
     curr_fg += fg_in_production[t]
     
     demand = daily_demand[t]
-    # STOCKOUT LOGIC: Only if FG is strictly less than demand
     if curr_fg < demand:
         unmet_demand[t] = demand - curr_fg
         stockout_flag[t] = 1
@@ -73,24 +74,20 @@ for t in range(days):
         
     fg_inv[t], rm_inv[t] = curr_fg, curr_rm
 
-# --- 4. KPIs & COST CALCULATIONS ---
+# --- 4. KPIs & COSTS ---
 total_demand = np.sum(daily_demand)
 fill_rate = ((total_demand - np.sum(unmet_demand)) / total_demand) * 100
-
 daily_rm_h_rate, daily_fg_h_rate = rm_hold_rate / 365, fg_hold_rate / 365
-num_rm_orders = rm_order_triggers.sum()
 
-cost_rm_purchase = (num_rm_orders * rm_order_qty) * rm_unit_cost
-cost_rm_ordering = num_rm_orders * rm_order_fixed_cost
+cost_rm_purchase = (rm_order_triggers.sum() * rm_order_qty) * rm_unit_cost
+cost_rm_ordering = rm_order_triggers.sum() * rm_order_fixed_cost
 cost_rm_holding = np.sum(rm_inv * rm_unit_cost * daily_rm_h_rate)
 cost_prod_fixed = prod_triggers.sum() * fg_fixed_setup
 cost_prod_var = (prod_triggers.sum() * fg_batch_size) * fg_var_cost
 cost_fg_holding = np.sum(fg_inv * (rm_unit_cost + fg_var_cost) * daily_fg_h_rate)
+total_tco = cost_rm_purchase + cost_rm_ordering + cost_rm_holding + cost_prod_fixed + cost_prod_var + cost_fg_holding
 
-total_tco = (cost_rm_purchase + cost_rm_ordering + cost_rm_holding + 
-             cost_prod_fixed + cost_prod_var + cost_fg_holding)
-
-# --- 5. TOP LEVEL KPIs ---
+# --- 5. UI DASHBOARD ---
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Service Fill Rate", f"{fill_rate:.1f}%")
 k2.metric("Stockout Days", int(stockout_flag.sum()), delta_color="inverse")
@@ -100,9 +97,9 @@ k5.metric("Avg RM Inventory", f"{rm_inv.mean():,.0f}")
 
 st.divider()
 
-# --- 6. COST BREAKUP (NOW BELOW KPIs) ---
+# Cost Table
 st.subheader("📝 Granular Cost Breakup")
-breakdown_data = [
+breakdown_df = pd.DataFrame([
     {"Component": "RM Purchase", "Value ($)": cost_rm_purchase},
     {"Component": "RM Ordering", "Value ($)": cost_rm_ordering},
     {"Component": "RM Holding", "Value ($)": cost_rm_holding},
@@ -110,10 +107,8 @@ breakdown_data = [
     {"Component": "Prod Variable", "Value ($)": cost_prod_var},
     {"Component": "FG Holding", "Value ($)": cost_fg_holding},
     {"Component": "TOTAL SYSTEM COST", "Value ($)": total_tco}
-]
-breakdown_df = pd.DataFrame(breakdown_data)
+])
 
-# Highlighting the total row
 st.table(breakdown_df.style.format({"Value ($)": "{:,.2f}"}).map(
     lambda x: 'font-weight: bold; background-color: #333333' if x == "TOTAL SYSTEM COST" else '', 
     subset=['Component']
@@ -121,7 +116,7 @@ st.table(breakdown_df.style.format({"Value ($)": "{:,.2f}"}).map(
 
 st.divider()
 
-# --- 7. VISUALIZATIONS ---
+# --- 6. VISUALS ---
 st.subheader("📈 Daily Demand Curve")
 demand_df = pd.DataFrame({'Day': range(days), 'Demand': daily_demand})
 st.altair_chart(alt.Chart(demand_df).mark_area(line={'color':'#e45756'}, opacity=0.3, color='#e45756').encode(
@@ -137,7 +132,7 @@ lines = alt.Chart(inv_melted).mark_line().encode(
     color=alt.Color('Type:N', scale=alt.Scale(domain=['RM Inventory', 'FG Inventory'], range=['#1f77b4', '#a6cee3']))
 )
 
-# Stockout "X" Markers (positioned at baseline)
+# Stockout "X" Markers
 x_marks = alt.Chart(inv_df[inv_df['Stockout'] == 1]).mark_point(
     shape='cross', color='red', size=200, strokeWidth=3, angle=45
 ).encode(x='Day:Q', y=alt.value(290))
