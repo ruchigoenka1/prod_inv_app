@@ -6,7 +6,7 @@ import altair as alt
 # 1. PAGE SETUP
 st.set_page_config(page_title="Supply Chain Performance Auditor", layout="wide")
 
-st.title("📊 Supply Chain Performance Auditor")
+st.title("📊 Ultimate Supply Chain & Production Auditor")
 st.markdown("---")
 
 # --- 2. SIDEBAR SETTINGS ---
@@ -17,10 +17,8 @@ with st.sidebar:
             st.session_state.demand_seed = 0
         st.session_state.demand_seed += 1
     
-    st.header("⏱️ Simulation Settings")
-    days = st.slider("Time Horizon (Days)", 100, 730, 365)
-    
     st.header("📈 Demand & Risk")
+    days = st.slider("Time Horizon (Days)", 100, 730, 365)
     mu_demand = st.number_input("Average Daily Demand", value=100)
     sigma_demand = st.number_input("Demand Variability (Std Dev)", value=25)
     
@@ -28,6 +26,7 @@ with st.sidebar:
     rm_order_qty = st.number_input("RM Order Quantity (Q)", value=5000)
     rm_rop = st.number_input("RM Reorder Point (ROP)", value=2500)
     rm_lead_time = st.slider("RM Lead Time (Days)", 1, 14, 5)
+    rm_order_delay = st.slider("Order Decision Delay (Days after ROP)", 0, 15, 0)
     rm_unit_cost = st.number_input("RM Unit Cost ($)", value=25.0)
     rm_order_fixed_cost = st.number_input("Fixed Cost per RM Order ($)", value=300.0)
     rm_hold_rate = st.slider("RM Annual Holding Rate (%)", 5, 50, 15) / 100
@@ -43,27 +42,28 @@ with st.sidebar:
 # --- 3. DEMAND GENERATION ---
 if 'demand_seed' not in st.session_state:
     st.session_state.demand_seed = 42
-
 np.random.seed(st.session_state.demand_seed)
 daily_demand = np.random.normal(mu_demand, sigma_demand, days).clip(min=0)
 
 # --- 4. THE SIMULATION ENGINE ---
 fg_inv, rm_inv = np.zeros(days), np.zeros(days)
-rm_on_order = np.zeros(days + rm_lead_time + 1)
+rm_on_order = np.zeros(days + rm_lead_time + rm_order_delay + 1)
 fg_in_production = np.zeros(days + prod_lead_time + 1)
 prod_triggers, rm_order_triggers = np.zeros(days), np.zeros(days)
 unmet_demand, stockout_flag = np.zeros(days), np.zeros(days)
 
-# Logic: Opening Balance = 1.25 * Production Trigger Point
+# Initial Balance: 1.25 * FG ROP
 curr_fg = fg_trigger_level * 1.25 
 curr_rm = rm_order_qty
+deadlock_detected = False
 
 for t in range(days):
+    # Arrival of RM and FG
     curr_rm += rm_on_order[t]
     curr_fg += fg_in_production[t]
     
+    # Demand Consumption
     demand = daily_demand[t]
-    # Stockout Logic: Current FG cannot meet demand
     if curr_fg < demand:
         unmet_demand[t] = demand - curr_fg
         stockout_flag[t] = 1
@@ -71,36 +71,49 @@ for t in range(days):
     else:
         curr_fg -= demand
     
-    # Production Triggering
+    # Production Trigger Logic
     pipeline_fg = fg_in_production[t+1:].sum()
     if (curr_fg + pipeline_fg) <= fg_trigger_level:
         if curr_rm >= fg_batch_size:
             fg_in_production[t + prod_lead_time] += fg_batch_size
             curr_rm -= fg_batch_size
             prod_triggers[t] = 1
+        else:
+            # Check for Deadlock: Inventory is stuck
+            effective_rm = curr_rm + rm_on_order[t+1:].sum()
+            if effective_rm > rm_rop and effective_rm < fg_batch_size:
+                deadlock_detected = True
 
-    # RM Reordering
+    # RM Reordering Logic with Delay
     pipeline_rm = rm_on_order[t+1:].sum()
     if (curr_rm + pipeline_rm) <= rm_rop:
-        rm_on_order[t + rm_lead_time] += rm_order_qty
-        rm_order_triggers[t] = 1
+        arrival_day = t + rm_order_delay + rm_lead_time
+        if arrival_day < len(rm_on_order):
+            rm_on_order[arrival_day] += rm_order_qty
+            rm_order_triggers[t] = 1
         
     fg_inv[t], rm_inv[t] = curr_fg, curr_rm
 
-# --- 5. KPIs & COSTS ---
+# --- 5. AUDIT CALCULATIONS ---
+if deadlock_detected:
+    st.error("🚨 **DEADLOCK DETECTED:** RM Inventory is stuck between ROP and Batch Size. Systems are frozen.")
+
 total_demand = np.sum(daily_demand)
 fill_rate = ((total_demand - np.sum(unmet_demand)) / total_demand) * 100
-daily_rm_h_rate, daily_fg_h_rate = rm_hold_rate / 365, fg_hold_rate / 365
 
-cost_rm_purchase = (rm_order_triggers.sum() * rm_order_qty) * rm_unit_cost
-cost_rm_ordering = rm_order_triggers.sum() * rm_order_fixed_cost
+# Costing
+daily_rm_h_rate, daily_fg_h_rate = rm_hold_rate / 365, fg_hold_rate / 365
+num_rm_orders = rm_order_triggers.sum()
+cost_rm_purchase = (num_rm_orders * rm_order_qty) * rm_unit_cost
+cost_rm_ordering = num_rm_orders * rm_order_fixed_cost
 cost_rm_holding = np.sum(rm_inv * rm_unit_cost * daily_rm_h_rate)
 cost_prod_fixed = prod_triggers.sum() * fg_fixed_setup
 cost_prod_var = (prod_triggers.sum() * fg_batch_size) * fg_var_cost
 cost_fg_holding = np.sum(fg_inv * (rm_unit_cost + fg_var_cost) * daily_fg_h_rate)
-total_tco = cost_rm_purchase + cost_rm_ordering + cost_rm_holding + cost_prod_fixed + cost_prod_var + cost_fg_holding
+total_tco = (cost_rm_purchase + cost_rm_ordering + cost_rm_holding + 
+             cost_prod_fixed + cost_prod_var + cost_fg_holding)
 
-# --- 6. KPI METRICS ---
+# --- 6. DASHBOARD KPIs ---
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Service Fill Rate", f"{fill_rate:.1f}%")
 k2.metric("Stockout Days", int(stockout_flag.sum()), delta_color="inverse")
@@ -110,7 +123,7 @@ k5.metric("Avg RM Inventory", f"{rm_inv.mean():,.0f}")
 
 st.divider()
 
-# --- 7. COST TABLE ---
+# --- 7. COST BREAKUP TABLE ---
 st.subheader("📝 Granular Cost Breakup")
 breakdown_df = pd.DataFrame([
     {"Component": "RM Purchase", "Value ($)": cost_rm_purchase},
@@ -121,7 +134,6 @@ breakdown_df = pd.DataFrame([
     {"Component": "FG Holding", "Value ($)": cost_fg_holding},
     {"Component": "TOTAL SYSTEM COST", "Value ($)": total_tco}
 ])
-
 st.table(breakdown_df.style.format({"Value ($)": "{:,.2f}"}).map(
     lambda x: 'font-weight: bold; background-color: #333333' if x == "TOTAL SYSTEM COST" else '', 
     subset=['Component']
@@ -129,7 +141,7 @@ st.table(breakdown_df.style.format({"Value ($)": "{:,.2f}"}).map(
 
 st.divider()
 
-# --- 8. VISUALS ---
+# --- 8. VISUALIZATIONS ---
 st.subheader("📈 Daily Demand Curve")
 demand_df = pd.DataFrame({'Day': range(days), 'Demand': daily_demand})
 st.altair_chart(alt.Chart(demand_df).mark_area(line={'color':'#e45756'}, opacity=0.3, color='#e45756').encode(
@@ -140,16 +152,16 @@ st.subheader("📦 Inventory Movement & Stockout Alerts")
 inv_df = pd.DataFrame({'Day': range(days), 'RM Inventory': rm_inv, 'FG Inventory': fg_inv, 'Stockout': stockout_flag})
 inv_melted = inv_df[['Day', 'RM Inventory', 'FG Inventory']].melt('Day', var_name='Type', value_name='Value')
 
-# Custom Blue/Azure Lines
+# Custom Azure Blue lines
 lines = alt.Chart(inv_melted).mark_line().encode(
     x='Day:Q', y='Value:Q',
     color=alt.Color('Type:N', scale=alt.Scale(domain=['RM Inventory', 'FG Inventory'], range=['#1f77b4', '#a6cee3']))
 )
 
-# Stockout "X" Markers
+# The "X" Mark for Stockouts
 x_marks = alt.Chart(inv_df[inv_df['Stockout'] == 1]).mark_point(
     shape='cross', color='red', size=200, strokeWidth=3, angle=45
-).encode(x='Day:Q', y=alt.value(290)) # Adjust value(290) based on chart height if needed
+).encode(x='Day:Q', y=alt.value(290))
 
 st.altair_chart(lines + x_marks, use_container_width=True)
 
