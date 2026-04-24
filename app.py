@@ -11,6 +11,13 @@ st.markdown("---")
 
 # --- 2. SIDEBAR SETTINGS ---
 with st.sidebar:
+    st.header("🔄 Scenario Control")
+    # Button to refresh demand data
+    if st.button("Generate New Demand Scenario"):
+        if 'demand_seed' not in st.session_state:
+            st.session_state.demand_seed = 0
+        st.session_state.demand_seed += 1
+    
     st.header("⏱️ Simulation Settings")
     days = st.slider("Time Horizon (Days)", 100, 730, 365)
     
@@ -34,18 +41,23 @@ with st.sidebar:
     fg_var_cost = st.number_input("Variable Prod Cost/Unit ($)", value=15.0)
     fg_hold_rate = st.slider("FG Annual Holding Rate (%)", 5, 50, 25) / 100
 
-# --- 3. THE SIMULATION ENGINE ---
-np.random.seed(42)
+# --- 3. DEMAND GENERATION (LOCKED VIA SESSION STATE) ---
+if 'demand_seed' not in st.session_state:
+    st.session_state.demand_seed = 42
+
+np.random.seed(st.session_state.demand_seed)
 daily_demand = np.random.normal(mu_demand, sigma_demand, days).clip(min=0)
 
+# --- 4. THE SIMULATION ENGINE ---
 fg_inv, rm_inv = np.zeros(days), np.zeros(days)
 rm_on_order = np.zeros(days + rm_lead_time + 1)
 fg_in_production = np.zeros(days + prod_lead_time + 1)
 prod_triggers, rm_order_triggers = np.zeros(days), np.zeros(days)
 unmet_demand, stockout_flag = np.zeros(days), np.zeros(days)
 
-# Logic: Opening Balance = 95% of demand during lead time
-curr_fg = (mu_demand * prod_lead_time) * 0.95
+# CORRECTED LOGIC: Opening balance covers Lead Time + a small buffer 
+# (Total demand during Lead Time) * 1.5 usually provides a realistic start
+curr_fg = (mu_demand * prod_lead_time) * 1.5 
 curr_rm = rm_order_qty
 
 for t in range(days):
@@ -74,7 +86,7 @@ for t in range(days):
         
     fg_inv[t], rm_inv[t] = curr_fg, curr_rm
 
-# --- 4. KPIs & COSTS ---
+# --- 5. KPIs & COSTS ---
 total_demand = np.sum(daily_demand)
 fill_rate = ((total_demand - np.sum(unmet_demand)) / total_demand) * 100
 daily_rm_h_rate, daily_fg_h_rate = rm_hold_rate / 365, fg_hold_rate / 365
@@ -87,7 +99,7 @@ cost_prod_var = (prod_triggers.sum() * fg_batch_size) * fg_var_cost
 cost_fg_holding = np.sum(fg_inv * (rm_unit_cost + fg_var_cost) * daily_fg_h_rate)
 total_tco = cost_rm_purchase + cost_rm_ordering + cost_rm_holding + cost_prod_fixed + cost_prod_var + cost_fg_holding
 
-# --- 5. UI DASHBOARD ---
+# --- 6. UI DASHBOARD ---
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Service Fill Rate", f"{fill_rate:.1f}%")
 k2.metric("Stockout Days", int(stockout_flag.sum()), delta_color="inverse")
@@ -97,7 +109,7 @@ k5.metric("Avg RM Inventory", f"{rm_inv.mean():,.0f}")
 
 st.divider()
 
-# Cost Table
+# --- 7. COST TABLE ---
 st.subheader("📝 Granular Cost Breakup")
 breakdown_df = pd.DataFrame([
     {"Component": "RM Purchase", "Value ($)": cost_rm_purchase},
@@ -116,7 +128,7 @@ st.table(breakdown_df.style.format({"Value ($)": "{:,.2f}"}).map(
 
 st.divider()
 
-# --- 6. VISUALS ---
+# --- 8. VISUALS ---
 st.subheader("📈 Daily Demand Curve")
 demand_df = pd.DataFrame({'Day': range(days), 'Demand': daily_demand})
 st.altair_chart(alt.Chart(demand_df).mark_area(line={'color':'#e45756'}, opacity=0.3, color='#e45756').encode(
