@@ -3,15 +3,15 @@ import pandas as pd
 import numpy as np
 
 # Page Configuration
-st.set_page_config(page_title="Supply Chain Auditor Pro", layout="wide")
+st.set_config(page_title="Supply Chain Auditor Pro", layout="wide")
 
-st.title("🏭 Total Cost Auditor: Production & Supply Chain")
+st.title("🏭 Professional Inventory & Production Auditor")
 st.markdown("---")
 
 # --- 1. SIDEBAR: PROFESSIONAL PARAMETERS ---
 with st.sidebar:
-    st.header("⏱️ Simulation Period")
-    days = st.slider("Time Horizon (Days)", 100, 730, 365)
+    st.header("⏱️ Simulation Settings")
+    days = st.slider("Timeline (Days)", 100, 730, 365)
     
     st.header("📈 Demand & Risk")
     mu = st.number_input("Average Daily Demand", value=100)
@@ -19,19 +19,21 @@ with st.sidebar:
     
     st.header("🏗️ Raw Material (RM) Policy")
     rm_order_qty = st.number_input("RM Order Quantity (Q)", value=5000)
-    rm_rop = st.number_input("RM Reorder Point (ROP)", value=2000)
-    rm_lead_time = st.slider("RM Lead Time (Days)", 0, 14, 5)
+    rm_rop = st.number_input("RM Reorder Point (ROP)", value=2500)
+    rm_lead_time = st.slider("RM Lead Time (Days)", 1, 14, 5)
     rm_unit_cost = st.number_input("RM Cost per Unit ($)", value=25)
     rm_order_fixed_cost = st.number_input("Fixed Cost per RM Order ($)", value=300)
     rm_hold_rate = st.slider("RM Annual Holding Rate (%)", 5, 50, 15) / 100
     
     st.header("📦 Production (FG) Policy")
-    fg_batch_size = st.number_input("Production Batch Size", value=1000)
+    fg_batch_size = st.number_input("Production Batch Size", value=1500)
+    fg_trigger_level = st.number_input("Production Reorder Point (FG ROP)", value=800)
+    prod_lead_time = st.slider("Production Lead Time (Days)", 1, 14, 3)
     fg_fixed_setup = st.number_input("Setup Cost per Batch ($)", value=2000)
     fg_var_cost = st.number_input("Variable Prod Cost/Unit ($)", value=15)
     fg_hold_rate = st.slider("FG Annual Holding Rate (%)", 5, 50, 25) / 100
 
-# --- 2. THE SIMULATION ENGINE ---
+# --- 2. THE VECTORIZED SIMULATION ENGINE ---
 np.random.seed(42)
 daily_demand = np.random.normal(mu, sigma, days).clip(min=0)
 
@@ -39,87 +41,95 @@ daily_demand = np.random.normal(mu, sigma, days).clip(min=0)
 fg_inv = np.zeros(days)
 rm_inv = np.zeros(days)
 rm_on_order = np.zeros(days + rm_lead_time + 1)
+fg_in_production = np.zeros(days + prod_lead_time + 1)
 prod_triggers = np.zeros(days)
 rm_order_triggers = np.zeros(days)
+unmet_demand = np.zeros(days)
 
 # Initial conditions
 curr_fg = fg_batch_size
 curr_rm = rm_order_qty
 
 for t in range(days):
-    # A. RM Delivery Check
+    # A. Incoming Arrivals (RM and FG)
     curr_rm += rm_on_order[t]
+    curr_fg += fg_in_production[t]
     
-    # B. Finished Goods Consumption
-    curr_fg -= daily_demand[t]
+    # B. Daily Demand & Stockout Check
+    demand = daily_demand[t]
+    if curr_fg >= demand:
+        curr_fg -= demand
+    else:
+        unmet_demand[t] = demand - curr_fg
+        curr_fg = 0
     
-    # C. Production Trigger
-    if curr_fg <= 0:
+    # C. Production Trigger (FG ROP)
+    # Check current FG + what is already in the production pipeline
+    pipeline_fg = fg_in_production[t+1:].sum()
+    if (curr_fg + pipeline_fg) <= fg_trigger_level:
         if curr_rm >= fg_batch_size:
-            curr_fg += fg_batch_size
+            fg_in_production[t + prod_lead_time] += fg_batch_size
             curr_rm -= fg_batch_size
             prod_triggers[t] = 1
 
-    # D. RM Reorder Trigger (Inventory + Transit)
-    effective_rm = curr_rm + rm_on_order[t+1:].sum()
-    if effective_rm <= rm_rop:
+    # D. Raw Material Reorder Trigger
+    pipeline_rm = rm_on_order[t+1:].sum()
+    if (curr_rm + pipeline_rm) <= rm_rop:
         rm_on_order[t + rm_lead_time] += rm_order_qty
         rm_order_triggers[t] = 1
         
-    fg_inv[t] = max(curr_fg, 0)
+    fg_inv[t] = curr_fg
     rm_inv[t] = curr_rm
 
-# --- 3. VECTORIZED BIFURCATED COST ANALYSIS ---
+# --- 3. AUDIT CALCULATIONS ---
+stockout_days = np.sum(unmet_demand > 0)
+total_demand = np.sum(daily_demand)
+fill_rate = ((total_demand - np.sum(unmet_demand)) / total_demand) * 100
+
+# Costing Breakup
 daily_rm_h_rate = rm_hold_rate / 365
 daily_fg_h_rate = fg_hold_rate / 365
 
-# Raw Material Costs (BIFURCATED)
-num_rm_orders = rm_order_triggers.sum()
-cost_rm_purchase = (num_rm_orders * rm_order_qty) * rm_unit_cost
-cost_rm_ordering = num_rm_orders * rm_order_fixed_cost
+cost_rm_purchase = (rm_order_triggers.sum() * rm_order_qty) * rm_unit_cost
+cost_rm_ordering = rm_order_triggers.sum() * rm_order_fixed_cost
 cost_rm_holding = np.sum(rm_inv * rm_unit_cost * daily_rm_h_rate)
 
-# Production Costs
-total_batches = prod_triggers.sum()
-cost_prod_fixed = total_batches * fg_fixed_setup
-cost_prod_var = (total_batches * fg_batch_size) * fg_var_cost
+cost_prod_fixed = prod_triggers.sum() * fg_fixed_setup
+cost_prod_var = (prod_triggers.sum() * fg_batch_size) * fg_var_cost
 
-# Finished Goods Holding Costs
-unit_fg_value = rm_unit_cost + fg_var_cost
-cost_fg_holding = np.sum(fg_inv * unit_fg_value * daily_fg_h_rate)
+# FG Value for holding = RM + Var Prod Cost
+cost_fg_holding = np.sum(fg_inv * (rm_unit_cost + fg_var_cost) * daily_fg_h_rate)
 
 total_tco = (cost_rm_purchase + cost_rm_ordering + cost_rm_holding + 
              cost_prod_fixed + cost_prod_var + cost_fg_holding)
 
-# --- 4. DASHBOARD UI ---
+# --- 4. DASHBOARD DISPLAY ---
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Total System TCO", f"${total_tco:,.2f}")
-m2.metric("Production Runs", int(total_batches))
-m3.metric("Purchase Orders (PO)", int(num_rm_orders))
-m4.metric("Avg RM Stock", f"{rm_inv.mean():,.0f}")
+m1.metric("Service Fill Rate", f"{fill_rate:.1f}%", delta=f"{int(stockout_days)} Stockout Days", delta_color="inverse")
+m2.metric("Total System TCO", f"${total_tco:,.0f}")
+m3.metric("Production Setup Count", int(prod_triggers.sum()))
+m4.metric("Avg FG Capital Tied", f"${(fg_inv.mean() * (rm_unit_cost + fg_var_cost)):,.0f}")
 
-st.subheader("📋 Granular Cost Breakup")
+st.subheader("📋 Granular Cost Audit")
 breakdown_df = pd.DataFrame({
     "Category": ["Raw Material", "Raw Material", "Raw Material", "Production", "Production", "Finished Goods", "TOTAL"],
-    "Component": ["Material Purchase Cost", "Ordering/Fixed PO Cost", "Holding Cost (RM)", 
-                  "Fixed Setup Cost", "Variable Volume Cost", "Holding Cost (FG)", "System TCO"],
-    "Value ($)": [cost_rm_purchase, cost_rm_ordering, cost_rm_holding, 
-                  cost_prod_fixed, cost_prod_var, cost_fg_holding, total_tco]
+    "Component": ["Material Purchase", "Ordering/Fixed PO", "Holding (RM)", "Fixed Setup", "Variable (Volume)", "Holding (FG)", "System TCO"],
+    "Value ($)": [cost_rm_purchase, cost_rm_ordering, cost_rm_holding, cost_prod_fixed, cost_prod_var, cost_fg_holding, total_tco]
 })
 st.table(breakdown_df.style.format({"Value ($)": "{:,.2f}"}))
 
 st.divider()
 
 # --- 5. VISUALIZATIONS ---
-st.subheader("📉 Movement & Demand Visualization")
+st.subheader("📉 The Inventory 'Sawtooth' & Supply Gaps")
 viz_df = pd.DataFrame({
     "Day": range(days),
     "RM Inventory": rm_inv,
     "FG Inventory": fg_inv,
-    "Daily Demand": daily_demand
+    "Stockout Volume": unmet_demand
 }).set_index("Day")
 
 st.line_chart(viz_df[["RM Inventory", "FG Inventory"]])
-st.bar_chart(viz_df["Daily Demand"])
+st.area_chart(viz_df["Stockout Volume"], color="#FF4B4B")
 
-st.info("💡 **Auditor Note:** Notice how bifurcating RM costs reveals that even if your Purchase Cost is high, your 'Ordering Cost' is actually a choice of frequency vs. volume.")
+st.info(f"**Strategic Insight:** Notice the red peaks. These represent unmet demand. If your Production Lead Time is {prod_lead_time} days, your FG ROP must be high enough to cover demand while the batch is in the oven.")
