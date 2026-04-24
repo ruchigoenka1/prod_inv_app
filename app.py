@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 
 # Page Configuration
-st.set_config(page_title="Supply Chain Auditor Pro", layout="wide")
+st.set_page_config(page_title="Supply Chain Auditor Pro", layout="wide")
 
 st.title("🏭 Professional Inventory & Production Auditor")
 st.markdown("---")
